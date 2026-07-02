@@ -3129,6 +3129,51 @@ logs_service() {
   esac
 }
 
+systemd_unit_file_path() {
+  printf '/etc/systemd/system/%s\n' "$(service_unit_name)"
+}
+
+systemd_user_unit_file_path() {
+  printf '%s/.config/systemd/user/%s\n' "$(user_home_dir)" "$(service_unit_name)"
+}
+
+systemd_unit_has_stale_runtime_template() {
+  local unit_file="$1"
+
+  [ -f "$unit_file" ] || return 1
+
+  grep -Eq '^[[:space:]]*Type=forking([[:space:]]|$)|^[[:space:]]*PIDFile=|clashctl[[:space:]]+start-direct' "$unit_file"
+}
+
+systemd_unit_stale_runtime_template_warning() {
+  local backend="$1"
+  local unit_file label refresh_cmd restart_cmd
+
+  case "$backend" in
+    systemd)
+      unit_file="$(systemd_unit_file_path)"
+      label="systemd"
+      refresh_cmd="sudo bash install.sh system"
+      restart_cmd="sudo systemctl restart $(service_unit_name)"
+      ;;
+    systemd-user)
+      unit_file="$(systemd_user_unit_file_path)"
+      label="用户级 systemd"
+      refresh_cmd="bash install.sh user"
+      restart_cmd="systemctl --user restart $(service_unit_name)"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  systemd_unit_has_stale_runtime_template "$unit_file" || return 1
+
+  echo "${label} 服务文件仍是旧模板：$unit_file"
+  echo "建议刷新服务文件：$refresh_cmd"
+  echo "刷新后重启服务：$restart_cmd"
+}
+
 cmd_logs() {
   prepare
 
@@ -3595,7 +3640,7 @@ doctor_build() {
 }
 
 doctor_service() {
-  local backend
+  local backend stale_warning
 
   doctor_print_title "服务检查"
 
@@ -3608,6 +3653,12 @@ doctor_service() {
 
   case "$backend" in
     systemd)
+      stale_warning="$(systemd_unit_stale_runtime_template_warning systemd 2>/dev/null || true)"
+      if [ -n "${stale_warning:-}" ]; then
+        doctor_warn "$stale_warning"
+      else
+        doctor_ok "systemd 服务模板：当前版本"
+      fi
       if systemctl is-active --quiet "$(service_unit_name)"; then
         doctor_ok "systemd 服务运行中"
         systemctl show "$(service_unit_name)" --property MainPID --value 2>/dev/null | awk '{print "    进程号：" $1}'
@@ -3616,6 +3667,12 @@ doctor_service() {
       fi
       ;;
     systemd-user)
+      stale_warning="$(systemd_unit_stale_runtime_template_warning systemd-user 2>/dev/null || true)"
+      if [ -n "${stale_warning:-}" ]; then
+        doctor_warn "$stale_warning"
+      else
+        doctor_ok "用户级 systemd 服务模板：当前版本"
+      fi
       if systemctl --user is-active --quiet "$(service_unit_name)"; then
         doctor_ok "用户级 systemd 服务运行中"
         systemctl --user show "$(service_unit_name)" --property MainPID --value 2>/dev/null | awk '{print "    进程号：" $1}'
